@@ -20,6 +20,14 @@
 #define LX (2 * M_PI)
 #define LY (2 * M_PI)
 #define NUM_IMAGES 1
+#define THETA 3*M_PI_2
+#define PHI 0
+
+
+// #define ST sin(THETA)
+// #define CT cos(THETA)
+// #define SP sin(PHI)
+// #define CP cos(PHI)
 
 texture<float, 3, cudaReadModeElementType> tex;
 
@@ -40,20 +48,42 @@ typedef float     SimPixelType;
 //     // }
 // }
 
+/*
+*	Texture lookup based 3D volume rotation.
+*	
+*
+*/
 __global__ void
 d_render(float *d_output /*, uint imageW, uint imageH, float w*/)
 {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-    int z = tid / 32768;
-    int x = tid % 128;
-    int y = ( tid % 32768 ) / 128;
+    int z = tid / 16384 + 1;
+    int x = tid % 128 + 1;
+    int y = ( tid % 16384 ) / 128 + 1;
 
+	float ST = sinf(THETA);
+	float CT = cosf(THETA);
+	float SP = sinf(PHI);
+	float CP = cosf(PHI);
+
+    int p1 = (NX + 1)/2 + 1;
+    int p2 = (NY + 1)/2 + 1;
+    int p3 = (NZ + 1)/2 + 1;
+
+    // Apply the rotation, nearest neighbor
+    float xx = roundf(x*CT + z*ST - CT*p1 + p1 - ST*p3);
+    float yy = roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
+    float zz = roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
+    if (xx <= NX && xx >= 1 && yy <= NY && yy >= 1 && zz <= NZ && zz >= 1) {
+    	uint idx = (zz - 1) * 16384 + (yy - 1) * 128 + xx - 1;
+    	float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
+    	d_output[idx] = voxel;
+    }
 
     // Apply a texture lookup
-    float voxel = tex3D( tex, x, y, z );
     // d_output[tid] = voxel;
-    atomicAdd( &d_output[tid], voxel );
+    // atomicAdd( &d_output[tid], voxel );
 }
 
  __global__ void Multiply_complex(SimPixelType* image_in, SimPixelType* image_in2) {
@@ -252,13 +282,13 @@ int main() {
 
 	tex.normalized = false;
 	tex.filterMode = cudaFilterModePoint; // Filtering mode
-	tex.addressMode[0] = cudaAddressModeWrap;
-	tex.addressMode[1] = cudaAddressModeWrap;
-	tex.addressMode[2] = cudaAddressModeWrap;
+	tex.addressMode[0] = cudaAddressModeBorder;
+	tex.addressMode[1] = cudaAddressModeBorder;
+	tex.addressMode[2] = cudaAddressModeBorder;
 	gpuErrchk(cudaBindTextureToArray(tex, d_volumeArray, channelDesc));
 
 	// Obtain data from texture memory
-	d_render<<< NX*NY*NZ/512, 512, 0, streams_fft[0] >>>( dev_pointers_out[0] );
+	d_render<<< NX*NY*NZ/256, 256, 0, streams_fft[0] >>>( dev_pointers_out[0] );
 
 	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
 		// cufftExecD2Z( planr2c[j],
@@ -340,6 +370,7 @@ int main() {
 		gpuErrchk( cudaFree( dev_pointers_in[j] ) );
 		gpuErrchk( cudaFree( dev_pointers_out[j] ) );
 		cudaStreamDestroy( streams_fft[j] );
+		gpuErrchk( cudaFreeArray( d_volumeArray ) );
 		delete[] image_vector[j];
 		delete[] mult_image_vector[j];
 	}
