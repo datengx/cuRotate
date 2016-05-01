@@ -19,7 +19,7 @@
 #define NZ 128
 #define LX (2 * M_PI)
 #define LY (2 * M_PI)
-#define NUM_IMAGES 1
+#define NUM_IMAGES 3
 #define THETA 3*M_PI_2
 #define PHI 0
 
@@ -54,7 +54,7 @@ typedef float     SimPixelType;
 *
 */
 __global__ void
-d_render(float *d_output /*, uint imageW, uint imageH, float w*/)
+d_render_tex(float *d_output /*, uint imageW, uint imageH, float w*/)
 {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -72,15 +72,65 @@ d_render(float *d_output /*, uint imageW, uint imageH, float w*/)
     int p3 = (NZ + 1)/2 + 1;
 
     // Apply the rotation, nearest neighbor
-    float xx = roundf(x*CT + z*ST - CT*p1 + p1 - ST*p3);
-    float yy = roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
-    float zz = roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
-    if (xx <= NX && xx >= 1 && yy <= NY && yy >= 1 && zz <= NZ && zz >= 1) {
-    	uint idx = (zz - 1) * 16384 + (yy - 1) * 128 + xx - 1;
-    	float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
-    	d_output[idx] = voxel;
-    }
+    int xx = roundf(x*CT + z*ST - CT*p1 + p1 - ST*p3);
 
+    if (xx > NX || xx < 1) return;
+
+    int yy = roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
+
+    if (yy > NY || yy < 1) return;
+
+    int zz = roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
+
+    if (zz > NZ || zz < 1) return;
+    // if (xx > NX || xx < 1 || yy > NY || yy < 1 || zz > NZ || zz < 1) {
+    // 	return;
+    // }
+	uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
+	float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
+	d_output[idx] = voxel;
+    // Apply a texture lookup
+    // d_output[tid] = voxel;
+    // atomicAdd( &d_output[tid], voxel );
+}
+
+__global__ void
+d_render(float *d_output, float *d_input /*, uint imageW, uint imageH, float w*/)
+{
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    int z = tid / 16384 + 1;
+    int x = tid % 128 + 1;
+    int y = ( tid % 16384 ) / 128 + 1;
+
+	float ST = sinf(THETA);
+	float CT = cosf(THETA);
+	float SP = sinf(PHI);
+	float CP = cosf(PHI);
+
+    int p1 = (NX + 1)/2 + 1;
+    int p2 = (NY + 1)/2 + 1;
+    int p3 = (NZ + 1)/2 + 1;
+
+    // Apply the rotation, nearest neighbor
+    int xx = roundf(x*CT + z*ST - CT*p1 + p1 - ST*p3);
+
+    if (xx > NX || xx < 1) return;
+
+    int yy = roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
+
+    if (yy > NY || yy < 1) return;
+
+    int zz = roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
+    
+    if (zz > NZ || zz < 1) return;
+    // if (xx > NX || xx < 1 || yy > NY || yy < 1 || zz > NZ || zz < 1) {
+    // 	return;
+    // }
+	uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
+	// float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
+	float voxel = d_input[ ((z - 1) << 14) + ((y - 1) << 7) + x - 1];
+	d_output[idx] = voxel;
     // Apply a texture lookup
     // d_output[tid] = voxel;
     // atomicAdd( &d_output[tid], voxel );
@@ -154,7 +204,8 @@ int main() {
 			        y[j * NX + kk] = kk * LY/NY;
 
 			        /* Put values in the new images */
-			        vx[j * NX + kk + p * NX * NY] = cos(x[j * NX + kk] + y[j * NX + kk]);
+			        // if (p == 64)
+			        	vx[j * NX + kk + p * NX * NY] = cos(x[j * NX + kk] + y[j * NX + kk]);
 			        if ( i == 0 ) {
 			        	in[j * NX + kk + p * NX * NY] = cos(x[j * NX + kk] + y[j * NX + kk]);
 			        }
@@ -259,36 +310,35 @@ int main() {
 	*	Apply the rotation
 	*/
 	/* Create texture array */
-	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
-		gpuErrchk( cudaStreamSynchronize( streams_fft[j] ) );
-	}
+	// for (unsigned int j = 0; j < NUM_IMAGES; j++) {
+	// 	gpuErrchk( cudaStreamSynchronize( streams_fft[j] ) );
+	// }
+
+	// cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+	// cudaArray *d_volumeArray = 0;
+	// const cudaExtent volumeSize = make_cudaExtent(128, 128, 128);
+	// size_t size = volumeSize.width*volumeSize.height*volumeSize.depth;
+	// gpuErrchk( cudaMalloc3DArray(&d_volumeArray, &channelDesc, volumeSize) );
+	// cudaMemcpy3DParms copyParams = {0};
+
+	// copyParams.srcPtr = make_cudaPitchedPtr( dev_pointers_in[0],
+	// 										 volumeSize.width*sizeof(float),
+	// 										 volumeSize.width,
+	// 										 volumeSize.height
+	// 										  );
+	// copyParams.dstArray = d_volumeArray;
+	// copyParams.extent = volumeSize;
+	// copyParams.kind = cudaMemcpyDeviceToDevice;
+	// gpuErrchk( cudaMemcpy3D( &copyParams) );
+
+	// tex.normalized = false;
+	// tex.filterMode = cudaFilterModePoint; // Filtering mode
+	// tex.addressMode[0] = cudaAddressModeBorder;
+	// tex.addressMode[1] = cudaAddressModeBorder;
+	// tex.addressMode[2] = cudaAddressModeBorder;
+	// gpuErrchk(cudaBindTextureToArray(tex, d_volumeArray, channelDesc));
 	t1 = absoluteTime();
-	cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
-	cudaArray *d_volumeArray = 0;
-	const cudaExtent volumeSize = make_cudaExtent(128, 128, 128);
-	size_t size = volumeSize.width*volumeSize.height*volumeSize.depth;
-	gpuErrchk( cudaMalloc3DArray(&d_volumeArray, &channelDesc, volumeSize) );
-	cudaMemcpy3DParms copyParams = {0};
 
-	copyParams.srcPtr = make_cudaPitchedPtr( dev_pointers_in[0],
-											 volumeSize.width*sizeof(float),
-											 volumeSize.width,
-											 volumeSize.height
-											  );
-	copyParams.dstArray = d_volumeArray;
-	copyParams.extent = volumeSize;
-	copyParams.kind = cudaMemcpyDeviceToDevice;
-	gpuErrchk( cudaMemcpy3D( &copyParams) );
-
-	tex.normalized = false;
-	tex.filterMode = cudaFilterModePoint; // Filtering mode
-	tex.addressMode[0] = cudaAddressModeBorder;
-	tex.addressMode[1] = cudaAddressModeBorder;
-	tex.addressMode[2] = cudaAddressModeBorder;
-	gpuErrchk(cudaBindTextureToArray(tex, d_volumeArray, channelDesc));
-
-	// Obtain data from texture memory
-	d_render<<< NX*NY*NZ/256, 256, 0, streams_fft[0] >>>( dev_pointers_out[0] );
 
 	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
 		// cufftExecD2Z( planr2c[j],
@@ -297,7 +347,9 @@ int main() {
 		// Multiply_complex<<< NX*NY*NZ/512, 512, 0, streams_fft[j] >>>( dev_pointers_out[j],
 		// 				  dev_OTF
 		// 					);
-
+		// Obtain data from texture memory
+		d_render<<< NX*NY*NZ/512, 512, 0, streams_fft[j] >>>( dev_pointers_out[j],
+														  dev_pointers_in[j] );
 		/* CUDA rotation */
 	}
 
@@ -370,7 +422,7 @@ int main() {
 		gpuErrchk( cudaFree( dev_pointers_in[j] ) );
 		gpuErrchk( cudaFree( dev_pointers_out[j] ) );
 		cudaStreamDestroy( streams_fft[j] );
-		gpuErrchk( cudaFreeArray( d_volumeArray ) );
+		// gpuErrchk( cudaFreeArray( d_volumeArray ) );
 		delete[] image_vector[j];
 		delete[] mult_image_vector[j];
 	}
