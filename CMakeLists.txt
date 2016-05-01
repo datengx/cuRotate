@@ -27,10 +27,6 @@ set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -arch=sm_21")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-write-strings")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Ofast")
 
-
-# Find ITK.
-# include(${ITK_USE_FILE})
-
 cuda_add_executable(cuRotate 
 				"./cuRotate.cu"
 				)
@@ -39,3 +35,13 @@ cuda_add_executable(cuRotate
 # target_link_libraries( cuRotate  )
 
 CUDA_ADD_CUFFT_TO_TARGET( cuRotate )
+
+## Find ITK.
+find_package(ITK REQUIRED)
+# FIND_PACKAGE( FFTW ) 
+include(${ITK_USE_FILE})
+
+add_library(itk_io SHARED "./itk_io.cpp" )
+target_link_libraries(itk_io ${ITK_LIBRARIES})
+
+target_link_libraries(cuRotate itk_io)

@@ -2,6 +2,7 @@
 #include "../common/book.h"
 #include "./utils.h"
 #include "./timing.h"
+#include "./itk_io.h"
 // #include "./cuda_kernels.cuh"
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "CannotResolve"
@@ -18,12 +19,13 @@
 #define NZ 128
 #define LX (2 * M_PI)
 #define LY (2 * M_PI)
-#define NUM_IMAGES 3
+#define NUM_IMAGES 1
 
+texture<float, 3, cudaReadModeElementType> tex;
 
 using namespace std;
 
-typedef double     SimPixelType;
+typedef float     SimPixelType;
 
 // __global__ void add_slices(PIXEL_TYPE* image_in, PIXEL_TYPE* image_out) {
 //     int tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -37,6 +39,22 @@ typedef double     SimPixelType;
 //     // }
 //     // }
 // }
+
+__global__ void
+d_render(float *d_output /*, uint imageW, uint imageH, float w*/)
+{
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    int z = tid / 32768;
+    int x = tid % 128;
+    int y = ( tid % 32768 ) / 128;
+
+
+    // Apply a texture lookup
+    float voxel = tex3D( tex, x, y, z );
+    // d_output[tid] = voxel;
+    atomicAdd( &d_output[tid], voxel );
+}
 
  __global__ void Multiply_complex(SimPixelType* image_in, SimPixelType* image_in2) {
      int tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -96,7 +114,7 @@ int main() {
 	for (unsigned i = 0; i < NUM_IMAGES; i++) {
 
 		SimPixelType *vx = new SimPixelType[NX * NY * NZ];
-		SimPixelType *mult_image = new SimPixelType[NX * NY * NZ * 2];
+		SimPixelType *mult_image = new SimPixelType[NX * NY * NZ];
 		// SimPixelType* vx;
 		// cudaMallocHost( &vx, NX * NY * NZ * sizeof(SimPixelType) );
 		for (int p = 0; p < NZ; p++) {
@@ -115,7 +133,7 @@ int main() {
 		}
 		t1 = absoluteTime();
 		gpuErrchk( cudaHostRegister( vx, sizeof(SimPixelType)*NX*NY*NZ, cudaHostRegisterPortable ) );
-		gpuErrchk( cudaHostRegister( mult_image, sizeof(SimPixelType)*NX*NY*NZ*2, cudaHostRegisterPortable ) );
+		gpuErrchk( cudaHostRegister( mult_image, sizeof(SimPixelType)*NX*NY*NZ, cudaHostRegisterPortable ) );
 		t2 = absoluteTime();
   		std::cout << "\n\n Register time: " << (float)(t2-t1)/1000000 << "ms" << std::endl;
 		// for (int j = 0; j < NY; j++){
@@ -132,7 +150,7 @@ int main() {
 		SimPixelType *d_out;
 		/* Some space on the device */
 		gpuErrchk(cudaMalloc(&d_vx, NX * NY * NZ * sizeof(SimPixelType)));
-		gpuErrchk(cudaMalloc(&d_out, NX * NY * NZ * sizeof(cufftDoubleComplex)));
+		gpuErrchk(cudaMalloc(&d_out, NX * NY * NZ * sizeof(cufftReal)));
 
 		/* Create cufft FFT plans */
 		int n[2] = {NX, NY};
@@ -149,7 +167,7 @@ int main() {
 		            onembed,
 		            1, //ostride
 		            NX * NY, // odist
-		            CUFFT_D2Z,
+		            CUFFT_R2C,
 		            NZ);
 
 
@@ -164,7 +182,7 @@ int main() {
 		            inembed,
 		            1, //ostride
 		            NX * NY, // odist
-		            CUFFT_Z2D,
+		            CUFFT_C2R,
 		            NZ);
 
 		cufftSetCompatibilityMode(planr2c[i], CUFFT_COMPATIBILITY_NATIVE);
@@ -185,7 +203,7 @@ int main() {
 	/* Copying data to the device for processing */
 	// cudaMemcpy(d_vx, vx, NX * NY * sizeof(cufftDoubleReal), cudaMemcpyHostToDevice);
 	// cudaMemcpy(d_out, out, NX * NY * sizeof(cufftDoubleComplex), cudaMemcpyHostToDevice);
-	t1 = absoluteTime();
+
 	gpuErrchk( cudaMemcpyAsync(
 				dev_OTF,
 				OTF,
@@ -202,23 +220,58 @@ int main() {
 									streams_fft[j]) );
 		gpuErrchk( cudaMemcpyAsync( dev_pointers_out[j],
 									out,
-									NX*NY*NZ*sizeof(cufftDoubleComplex),
+									NX*NY*NZ*sizeof(cufftReal),
 									cudaMemcpyHostToDevice,
 									streams_fft[j] ) );
 
 	}
+	/*
+	*	Apply the rotation
+	*/
+	/* Create texture array */
+	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
+		gpuErrchk( cudaStreamSynchronize( streams_fft[j] ) );
+	}
+	t1 = absoluteTime();
+	cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+	cudaArray *d_volumeArray = 0;
+	const cudaExtent volumeSize = make_cudaExtent(128, 128, 128);
+	size_t size = volumeSize.width*volumeSize.height*volumeSize.depth;
+	gpuErrchk( cudaMalloc3DArray(&d_volumeArray, &channelDesc, volumeSize) );
+	cudaMemcpy3DParms copyParams = {0};
+
+	copyParams.srcPtr = make_cudaPitchedPtr( dev_pointers_in[0],
+											 volumeSize.width*sizeof(float),
+											 volumeSize.width,
+											 volumeSize.height
+											  );
+	copyParams.dstArray = d_volumeArray;
+	copyParams.extent = volumeSize;
+	copyParams.kind = cudaMemcpyDeviceToDevice;
+	gpuErrchk( cudaMemcpy3D( &copyParams) );
+
+	tex.normalized = false;
+	tex.filterMode = cudaFilterModePoint; // Filtering mode
+	tex.addressMode[0] = cudaAddressModeWrap;
+	tex.addressMode[1] = cudaAddressModeWrap;
+	tex.addressMode[2] = cudaAddressModeWrap;
+	gpuErrchk(cudaBindTextureToArray(tex, d_volumeArray, channelDesc));
+
+	// Obtain data from texture memory
+	d_render<<< NX*NY*NZ/512, 512, 0, streams_fft[0] >>>( dev_pointers_out[0] );
 
 	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
-		cufftExecD2Z( planr2c[j],
-					  (SimPixelType*)dev_pointers_in[j],
-					  (cufftDoubleComplex*)dev_pointers_out[j]);
-		Multiply_complex<<< NX*NY*NZ/512, 512, 0, streams_fft[j] >>>( dev_pointers_out[j],
-						  dev_OTF
-							);
+		// cufftExecD2Z( planr2c[j],
+		// 			  (SimPixelType*)dev_pointers_in[j],
+		// 			  (cufftDoubleComplex*)dev_pointers_out[j]);
+		// Multiply_complex<<< NX*NY*NZ/512, 512, 0, streams_fft[j] >>>( dev_pointers_out[j],
+		// 				  dev_OTF
+		// 					);
+
+		/* CUDA rotation */
 	}
 
-	t2 = absoluteTime();
-  	std::cout << "\n\n Streaming time: " << (float)(t2-t1)/1000000 << "ms" << std::endl;
+
 //	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
 //		cufftSetStream(planc2r[j], streams_fft[j]);
 //	}
@@ -228,16 +281,18 @@ int main() {
 //	}
 
 	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
-		gpuErrchk( cudaMemcpyAsync( mult_image_vector[j], dev_pointers_out[j], 2*NX*NY*NZ*sizeof(SimPixelType), cudaMemcpyDeviceToHost, streams_fft[j] ) );
+		gpuErrchk( cudaMemcpyAsync( mult_image_vector[j], dev_pointers_out[j], NX*NY*NZ*sizeof(SimPixelType), cudaMemcpyDeviceToHost, streams_fft[j] ) );
 	}
 
 	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
 		gpuErrchk( cudaStreamSynchronize( streams_fft[j] ) );
 	}
-	t1 = absoluteTime();
+
+	t2 = absoluteTime();
+  	std::cout << "\n\n Streaming time: " << (float)(t2-t1)/1000000 << "ms" << std::endl;
+ 	t1 = absoluteTime();
 	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
 		gpuErrchk( cudaHostUnregister(image_vector[j]) );
-		gpuErrchk( cudaHostUnregister(mult_image_vector[j]) );
 		// gpuErrchk( cudaFreeHost(image_vector[j]) );
 	}
 	gpuErrchk( cudaHostUnregister(OTF) );
@@ -246,19 +301,17 @@ int main() {
 	t2 = absoluteTime();
   	std::cout << "\n\n Host Unregister time: " << (float)(t2-t1)/1000000 << "ms" << std::endl;
 
-	/* Cast into complex value array */
-	complex< SimPixelType >* complex_array = reinterpret_cast< complex< SimPixelType >* >( mult_image_vector[1] );
 
-   	for (int j = 0; j < NY; j++){
-	     for (int i = 0; i < NX; i++){
-	         // printf("%.3f ", vx[j*NX + i]/(NX*NY));
-	         // SimPixelType* vx = image_vector[1];
-//	         cout << image_vector[0][j * NX + i]/( NX * NY ) << " ";
-			cout << complex_array[j * NX + i] << " ";
-	     }
-	     // printf("\n");
-	     cout << endl;
-	 }
+//    	for (int j = 0; j < NY; j++){
+// 	     for (int i = 0; i < NX; i++){
+// 	         // printf("%.3f ", vx[j*NX + i]/(NX*NY));
+// 	         // SimPixelType* vx = image_vector[1];
+// //	         cout << image_vector[0][j * NX + i]/( NX * NY ) << " ";
+// 			cout << complex_array[j * NX + i] << " ";
+// 	     }
+// 	     // printf("\n");
+// 	     cout << endl;
+// 	 }
 	// cout << endl;
 	// for (int j = 0; j < NY; j++){
 	//     for (int i = 0; i < NX; i++){
@@ -268,6 +321,20 @@ int main() {
 	//     // printf("\n");
 	//     cout << endl;
 	// }
+
+	/*
+	*	Output an image for testing
+	*/
+	store_mha/*<double>*/( mult_image_vector[0],// input image
+	 			3, // dim
+	 			NX,// h
+	 			NY,// w
+	 			NZ,// d
+	 			"./tex_image.mha" // output dest
+	 			 );
+
+
+
 
 	for (unsigned int j = 0; j < NUM_IMAGES; j++) {
 		gpuErrchk( cudaFree( dev_pointers_in[j] ) );
@@ -293,11 +360,6 @@ int main() {
 
 	/* Copy results back from the device */
 	// cudaMemcpy(vx, d_vx, NX * NY * sizeof(cufftDoubleReal), cudaMemcpyDeviceToHost);
-
-
-
-
-
 
 
     // int count = 0;
