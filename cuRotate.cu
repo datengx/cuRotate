@@ -20,8 +20,8 @@
 #define LX (2 * M_PI)
 #define LY (2 * M_PI)
 #define NUM_IMAGES 3
-#define THETA 3*M_PI_2
-#define PHI 0
+#define THETA 6.125*M_PI_4
+#define PHI 2.4812
 
 
 // #define ST sin(THETA)
@@ -48,6 +48,13 @@ typedef float     SimPixelType;
 //     // }
 // }
 
+__device__ float my_roundf (float a)
+{
+    float fa = fabsf (a);
+    float t = ((fa >= 0.5f) && (fa <= 8388608.0f)) ? 0.5f : 0.0f;
+    return copysignf (truncf (fa + t), a);
+}
+
 /*
 *	Texture lookup based 3D volume rotation.
 *	
@@ -72,30 +79,30 @@ d_render_tex(float *d_output /*, uint imageW, uint imageH, float w*/)
     int p3 = (NZ + 1)/2 + 1;
 
     // Apply the rotation, nearest neighbor
-    int xx = roundf(x*CT + z*ST - CT*p1 + p1 - ST*p3);
+    int xx = my_roundf(x*CT + z*ST - CT*p1 + p1 - ST*p3);
 
     if (xx > NX || xx < 1) return;
 
-    int yy = roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
+    int yy = my_roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
 
     if (yy > NY || yy < 1) return;
 
-    int zz = roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
+    int zz = my_roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
 
     if (zz > NZ || zz < 1) return;
-    // if (xx > NX || xx < 1 || yy > NY || yy < 1 || zz > NZ || zz < 1) {
-    // 	return;
-    // }
+
 	uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
 	float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
 	d_output[idx] = voxel;
-    // Apply a texture lookup
-    // d_output[tid] = voxel;
-    // atomicAdd( &d_output[tid], voxel );
 }
 
 __global__ void
-d_render(float *d_output, float *d_input /*, uint imageW, uint imageH, float w*/)
+d_render(float *d_output,
+		 float *d_input,
+		 float ST,
+         float CT,
+         float SP,
+         float CP /*, uint imageW, uint imageH, float w*/)
 {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -103,37 +110,127 @@ d_render(float *d_output, float *d_input /*, uint imageW, uint imageH, float w*/
     int x = tid % 128 + 1;
     int y = ( tid % 16384 ) / 128 + 1;
 
-	float ST = sinf(THETA);
-	float CT = cosf(THETA);
-	float SP = sinf(PHI);
-	float CP = cosf(PHI);
+	// float ST = sinf(THETA);
+	// float CT = cosf(THETA);
+	// float SP = sinf(PHI);
+	// float CP = cosf(PHI);
+
+    int p1 = (NX + 1)/2 + 1;
+    int p2 = (NY + 1)/2 + 1;
+    int p3 = (NZ + 1)/2 + 1;
+
+    // Apply the rotation, nearest neighbor resampling
+    // int xx = roundf(x*CT + z*ST - CT*p1 + p1 - ST*p3);
+
+    // if (xx > NX || xx < 1) return;
+
+    // int yy = roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
+
+    // if (yy > NY || yy < 1) return;
+
+    // int zz = roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
+
+    // if (zz > NZ || zz < 1) return;
+
+    /*
+    *	T1.inv * T2.inv * T3.inv * T4.inv
+    */
+    // int xx = roundf( x*CT - y*ST*SP + z*ST*CP - p1*CT + p2*ST*SP - p3*ST*CP + p1);
+    // if (xx > NX || xx < 1) return;
+    // int yy = roundf( y*CP + z*SP - p2*CP - p3*SP + p2 );
+    // if (yy > NY || yy < 1) return;
+    // int zz = roundf( - x*ST - y*CT*SP + z*CT*CP + p1*ST + p2*CT*SP - CT*CP*p3 + p3 );
+    // if (zz > NZ || zz < 1) return;
+    /*
+    *	T4 * T2 * T3 * T1
+    */
+    int xx = roundf( x*CT - y*ST*SP - z*ST*CP - p1*CT + p2*ST*SP + p3*ST*CP + p1);
+    if (xx > NX || xx < 1) return;
+    int yy = roundf( y*CP - z*SP - p2*CP + p3*SP + p2 );
+    if (yy > NY || yy < 1) return;
+    int zz = roundf( x*ST + y*CT*SP + z*CT*CP - p1*ST - p2*CT*SP - CT*CP*p3 + p3 );
+    if (zz > NZ || zz < 1) return;
+
+    // int xx = my_roundf( x*CT - z*ST*CP - p1*CT + p3*ST + p1);
+    // if (xx > NX || xx < 1) return;
+    // int yy = my_roundf( - x*SP*ST + y*CP - z*SP*CT + p1*SP*ST - p2*CP + p3*SP*CT + p2 );
+    // if (yy > NY || yy < 1) return;
+    // int zz = my_roundf( x*CP*ST + y*SP + z*CP*CT - p1*CP*ST - p2*SP - p3*CP*CT + p3 );
+    // if (zz > NZ || zz < 1) return;
+
+	uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
+	// float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
+	float voxel = d_input[ idx ];
+	d_output[tid] = voxel;
+
+}
+
+__global__ void
+d_render_cumulate(float *d_output,
+         float *d_input,
+         float ST,
+         float CT,
+         float SP,
+         float CP
+          )
+{
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    int z = tid / 16384 + 1;
+    int x = tid % 128 + 1;
+    int y = ( tid % 16384 ) / 128 + 1;
+
+  // float ST = sinf(theta);
+  // float CT = cosf(theta);
+  // float SP = sinf(phi);
+  // float CP = cosf(phi);
+
+
+
+
 
     int p1 = (NX + 1)/2 + 1;
     int p2 = (NY + 1)/2 + 1;
     int p3 = (NZ + 1)/2 + 1;
 
     // Apply the rotation, nearest neighbor
-    int xx = roundf(x*CT + z*ST - CT*p1 + p1 - ST*p3);
+    // int xx = my_roundf( x*CT + z*ST - CT*p1 + p1 - ST*p3 );
+    // if (xx > NX || xx < 1) return;
+    // int yy = my_roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
+    // if (yy > NY || yy < 1) return;
+    // int zz = my_roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
+    // if (zz > NZ || zz < 1) return;
+    // Apply the rotation, nearest neighbor
 
+    // int xx = roundf( x*CT - y*ST*SP - z*ST*CP - p1*CT + p2*ST*SP + p3*ST*CP + p1);
+    // if (xx > NX || xx < 1) return;
+    // int yy = roundf( y*CP - z*SP - p2*CP + p3*SP + p2 );
+    // if (yy > NY || yy < 1) return;
+    // int zz = roundf( x*ST + y*CT*SP + z*CT*CP - p1*ST - p2*CT*SP - CT*CP*p3 + p3 );
+    // if (zz > NZ || zz < 1) return;
+
+    /*
+    * Apply inverse rotation and find the nearest neighbor in the 
+    * ORIGINAL image instead of in the output image.
+    */
+
+	int xx = roundf( x*CT - z*ST - p1*CT + p3*ST + p1);
     if (xx > NX || xx < 1) return;
-
-    int yy = roundf(- x*SP*ST + y*CP + z*SP*CT + SP*ST*p1 - CP*p2 - SP*CT*p3 + p2);
-
+    int yy = roundf( - x*SP*ST + y*CP - z*SP*CT + p1*SP*ST - p2*CP + p3*SP*CT + p2 );
     if (yy > NY || yy < 1) return;
-
-    int zz = roundf(- x*CP*ST - y*SP + z*CP*CT + CP*ST*p1 + SP*p2 - CP*CT*p3 + p3);
-    
+    int zz = roundf( x*CP*ST + y*SP + z*CP*CT - p1*CP*ST - p2*SP - p3*CP*CT + p3 );
     if (zz > NZ || zz < 1) return;
+    
     // if (xx > NX || xx < 1 || yy > NY || yy < 1 || zz > NZ || zz < 1) {
-    // 	return;
+    //  return;
     // }
-	uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
-	// float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
-	float voxel = d_input[ ((z - 1) << 14) + ((y - 1) << 7) + x - 1];
-	d_output[idx] = voxel;
+  uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
+  // float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
+  float voxel = d_input[ idx ];
+  d_output[tid] = voxel;
     // Apply a texture lookup
     // d_output[tid] = voxel;
-    // atomicAdd( &d_output[tid], voxel );
+  // atomicAdd( &d_output[tid], voxel );
 }
 
  __global__ void Multiply_complex(SimPixelType* image_in, SimPixelType* image_in2) {
@@ -348,9 +445,13 @@ int main() {
 		// 				  dev_OTF
 		// 					);
 		// Obtain data from texture memory
-		d_render<<< NX*NY*NZ/512, 512, 0, streams_fft[j] >>>( dev_pointers_out[j],
-														  dev_pointers_in[j] );
-		/* CUDA rotation */
+		d_render_cumulate<<< NX*NY*NZ/256, 256, 0, streams_fft[j] >>>( dev_pointers_out[j],
+														  dev_pointers_in[j],
+														   sin(-THETA),
+												           cos(-THETA),
+												           sin(-PHI),
+												           cos(-PHI) );
+														/* CUDA rotation */
 	}
 
 
