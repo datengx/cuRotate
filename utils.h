@@ -66,7 +66,7 @@ void printBits(size_t const size, void const * const ptr)
 void printDevInfo(int count, 
 				cudaDeviceProp prop) {
 	for (int i = 0; i < count; i++) {
-		HANDLE_ERROR( cudaGetDeviceProperties(&prop, i) );
+		gpuErrchk( cudaGetDeviceProperties(&prop, i) );
 		printf( "   --- General Information for device %d ---\n", i );
 	    printf( "Name:  %s\n", prop.name );
 	    printf( "Compute capability:  %d.%d\n", prop.major, prop.minor );

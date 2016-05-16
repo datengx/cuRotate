@@ -1,5 +1,5 @@
 
-#include "../common/book.h"
+// #include "../common/book.h"
 #include "./utils.h"
 #include "./timing.h"
 #include "./itk_io.h"
@@ -13,13 +13,17 @@
 #include <vector>
 #include <cstring>
 
+/* cufftShift library */
+#include <cufftShiftInterface.h>
 
-#define NX 128
-#define NY 128
-#define NZ 128
+
+#define NX 16
+#define NY 16
+#define NZ 16
+#define POW 4
 #define LX (2 * M_PI)
 #define LY (2 * M_PI)
-#define NUM_IMAGES 3
+#define NUM_IMAGES 1
 #define THETA 6.125*M_PI_4
 #define PHI 2.4812
 
@@ -65,9 +69,9 @@ d_render_tex(float *d_output /*, uint imageW, uint imageH, float w*/)
 {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-    int z = tid / 16384 + 1;
-    int x = tid % 128 + 1;
-    int y = ( tid % 16384 ) / 128 + 1;
+    int z = tid / (NX * NY) + 1;
+    int x = tid % NX + 1;
+    int y = ( tid % (NX * NY) ) / NX + 1;
 
 	float ST = sinf(THETA);
 	float CT = cosf(THETA);
@@ -91,7 +95,7 @@ d_render_tex(float *d_output /*, uint imageW, uint imageH, float w*/)
 
     if (zz > NZ || zz < 1) return;
 
-	uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
+	uint idx = ((zz - 1) << (2 * POW)) + ((yy - 1) << POW) + xx - 1;
 	float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
 	d_output[idx] = voxel;
 }
@@ -106,9 +110,9 @@ d_render(float *d_output,
 {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-    int z = tid / 16384 + 1;
-    int x = tid % 128 + 1;
-    int y = ( tid % 16384 ) / 128 + 1;
+    int z = tid / (NX * NY) + 1;
+    int x = tid % NX + 1;
+    int y = ( tid % (NX * NY) ) / NX + 1;
 
 	// float ST = sinf(THETA);
 	// float CT = cosf(THETA);
@@ -158,7 +162,7 @@ d_render(float *d_output,
     // int zz = my_roundf( x*CP*ST + y*SP + z*CP*CT - p1*CP*ST - p2*SP - p3*CP*CT + p3 );
     // if (zz > NZ || zz < 1) return;
 
-	uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
+	uint idx = ((zz - 1) << (2 * POW)) + ((yy - 1) << POW) + xx - 1;
 	// float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
 	float voxel = d_input[ idx ];
 	d_output[tid] = voxel;
@@ -176,9 +180,9 @@ d_render_cumulate(float *d_output,
 {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-    int z = tid / 16384 + 1;
-    int x = tid % 128 + 1;
-    int y = ( tid % 16384 ) / 128 + 1;
+    int z = tid / (NX * NY) + 1;
+    int x = tid % NX + 1;
+    int y = ( tid % (NX * NY) ) / NX + 1;
 
   // float ST = sinf(theta);
   // float CT = cosf(theta);
@@ -224,7 +228,7 @@ d_render_cumulate(float *d_output,
     // if (xx > NX || xx < 1 || yy > NY || yy < 1 || zz > NZ || zz < 1) {
     //  return;
     // }
-  uint idx = ((zz - 1) << 14) + ((yy - 1) << 7) + xx - 1;
+  uint idx = ((zz - 1) << (2 * POW)) + ((yy - 1) << POW) + xx - 1;
   // float voxel = tex3D( tex, x - 1, y - 1, z - 1 );
   float voxel = d_input[ idx ];
   d_output[tid] = voxel;
@@ -496,15 +500,31 @@ int main() {
 // 	     cout << endl;
 // 	 }
 	// cout << endl;
-	// for (int j = 0; j < NY; j++){
-	//     for (int i = 0; i < NX; i++){
-	//         // printf("%.3f ", vx[j*NX + i]/(NX*NY));
-	//         cout << in[j * NX + i] << " ";
-	//     }
-	//     // printf("\n");
-	//     cout << endl;
-	// }
+	for (int j = 0; j < NY; j++){
+	    for (int i = 0; i < NX; i++){
+	        // printf("%.3f ", vx[j*NX + i]/(NX*NY));
+	        printf("% .2e ", mult_image_vector[0][ 0 * NX * NY + j * NX + i]);
+	    }
+	    // printf("\n");
+	    cout << endl;
+	}
 
+	float* buffer = (float*) malloc( sizeof(float) * NX * NY );
+	float* dev_buf;
+	memcpy( buffer, mult_image_vector[0], sizeof(float) * NX * NY );
+	gpuErrchk( cudaMalloc( &dev_buf, sizeof(float) * NX * NY ) );
+	gpuErrchk( cudaMemcpy( dev_buf, buffer, sizeof(float) * NX * NY, cudaMemcpyHostToDevice ) );
+	cufftShift_2D_impl( dev_buf, NX, NY );
+	gpuErrchk( cudaMemcpy( buffer, dev_buf, sizeof(float) * NX * NY, cudaMemcpyDeviceToHost ) );
+	printf("Shifted output:\n");
+	for (int j = 0; j < NY; j++){
+	    for (int i = 0; i < NX; i++){
+	        // printf("%.3f ", vx[j*NX + i]/(NX*NY));
+	        printf("% .2e ", buffer[ j * NX + i]);
+	    }
+	    // printf("\n");
+	    cout << endl;
+	}
 	/*
 	*	Output an image for testing
 	*/
@@ -532,6 +552,7 @@ int main() {
 	delete[] out;
 	delete[] x;
 	delete[] y;
+	free( buffer );
 
 	cudaDeviceReset();
 

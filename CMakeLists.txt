@@ -13,10 +13,13 @@ endif()
 
 project(test_cufft)
 
+#### cufftshift library
+add_subdirectory(cufftShift-master)
 
 add_definitions( -DCUDA_API_PER_THREAD_DEFAULT_STREAM )
-find_package(CUDA QUIET REQUIRED)	# Find CUDA library
 
+################### Find CUDA library
+find_package(CUDA QUIET REQUIRED)
 
 set( CMAKE_EXE_LINKER_FLAGS  "${CMAKE_EXE_LINKER_FLAGS}  -O3")
 
@@ -30,6 +33,10 @@ include_directories(
 			"/usr/local/cuda/include"
 	)
 endif()
+include_directories( "${CMAKE_CURRENT_SOURCE_DIR}/cufftShift-master/Src"
+					)
+
+
 
 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -arch=sm_21")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-write-strings")
@@ -44,6 +51,7 @@ cuda_add_executable(cuRotate
 
 CUDA_ADD_CUFFT_TO_TARGET( cuRotate )
 
+
 ## Find ITK.
 find_package(ITK REQUIRED)
 # FIND_PACKAGE( FFTW ) 
@@ -52,4 +60,12 @@ include(${ITK_USE_FILE})
 add_library(itk_io SHARED "./itk_io.cpp" )
 target_link_libraries(itk_io ${ITK_LIBRARIES})
 
-target_link_libraries(cuRotate itk_io)
+target_link_libraries(cuRotate itk_io cufftShift)
+
+
+
+
+
+
+
+
